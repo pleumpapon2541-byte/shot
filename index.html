@@ -1,160 +1,168 @@
 <!DOCTYPE html>
+
 <html>
 <head>
 <meta charset="UTF-8">
-<title>Airsoft Timer</title>
+<title>Laser Trainer PRO</title>
+<script async src="https://docs.opencv.org/4.x/opencv.js"></script>
 <style>
-body {
-    font-family: Arial;
-    text-align: center;
-    background: #111;
-    color: #fff;
-}
-.container {
-    max-width: 400px;
-    margin: auto;
-}
-button {
-    padding: 15px;
-    font-size: 18px;
-    margin: 10px;
-}
-#meter {
-    width: 100%;
-    height: 20px;
-    background: #333;
-}
-#level {
-    height: 100%;
-    width: 0%;
-    background: lime;
-}
+body { margin:0; background:black; color:white; font-family:sans-serif; text-align:center;}
+video, canvas { position:absolute; top:0; left:0; }
+#ui { position:fixed; bottom:10px; left:0; right:0; }
+button { padding:8px 14px; margin:3px; }
 </style>
 </head>
-
 <body>
-<div class="container">
-<h2>🔫 Airsoft Timer</h2>
 
-<p>Shots: <input id="shots" type="number" value="5"></p>
-<p>Delay: <input id="delay" type="number" value="3"></p>
-<p>Sensitivity: <input id="threshold" type="range" min="0.01" max="0.5" step="0.01" value="0.1"></p>
+<video id="video" autoplay playsinline></video> <canvas id="canvas"></canvas>
 
-<div id="meter"><div id="level"></div></div>
-
-<h3 id="status">Ready</h3>
-
-<button onclick="start()">START</button>
-
-<pre id="log"></pre>
+<div id="ui">
+  <div>Score: <span id="score">0</span> | Shots: <span id="shots">0</span></div>
+  <button onclick="start()">Start</button>
+  <button onclick="startCalibration()">Calibrate</button>
+  <button onclick="reset()">Reset</button>
 </div>
 
 <script>
-let audioContext;
-let analyser;
-let dataArray;
-let running = false;
+let video = document.getElementById("video");
+let canvas = document.getElementById("canvas");
+let ctx = canvas.getContext("2d");
 
-let shotsDetected = 0;
-let lastShotTime = 0;
-let startTime = 0;
+let score=0, shots=0;
+let lastShot=0;
 
-const cooldown = 200; // ms
+let calibrating=false;
+let points=[];
+let zones=[];
 
-async function initMic() {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    audioContext = new AudioContext();
-    const source = audioContext.createMediaStreamSource(stream);
-
-    analyser = audioContext.createAnalyser();
-    analyser.fftSize = 2048;
-
-    source.connect(analyser);
-
-    dataArray = new Uint8Array(analyser.fftSize);
+function updateUI(){
+ document.getElementById("score").innerText=score;
+ document.getElementById("shots").innerText=shots;
 }
 
-function getVolume() {
-    analyser.getByteTimeDomainData(dataArray);
-    let sum = 0;
-    for (let i = 0; i < dataArray.length; i++) {
-        let x = (dataArray[i] - 128) / 128;
-        sum += x * x;
-    }
-    return Math.sqrt(sum / dataArray.length);
+async function start(){
+ const stream = await navigator.mediaDevices.getUserMedia({video:true});
+ video.srcObject=stream;
+ video.onloadedmetadata=()=>{
+  canvas.width=video.videoWidth;
+  canvas.height=video.videoHeight;
+  detect();
+ }
 }
 
-function beep() {
-    const ctx = new AudioContext();
-    const osc = ctx.createOscillator();
-    osc.frequency.value = 1000;
-    osc.connect(ctx.destination);
-    osc.start();
-    setTimeout(() => osc.stop(), 200);
+function reset(){ score=0; shots=0; updateUI(); }
+
+function startCalibration(){
+ calibrating=true;
+ points=[];
+ alert("แตะ 4 มุมของเป้า (ซ้ายบน → ขวาบน → ขวาล่าง → ซ้ายล่าง)");
 }
 
-function log(msg) {
-    document.getElementById("log").textContent += msg + "\n";
+canvas.onclick=(e)=>{
+ if(calibrating){
+  points.push([e.offsetX,e.offsetY]);
+  if(points.length==4){
+   calibrating=false;
+   createZones();
+  }
+ }
 }
 
-async function start() {
-    if (running) return;
+function createZones(){
+ let [p1,p2,p3,p4]=points;
 
-    document.getElementById("log").textContent = "";
+ function interp(a,b,t){
+  return [a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t];
+ }
 
-    if (!audioContext) await initMic();
+ zones = [
+  { score:10, poly:[interp(p1,p3,0.4),interp(p2,p4,0.4),interp(p2,p4,0.6),interp(p1,p3,0.6)] },
+  { score:8,  poly:[p1,p2,p3,p4] },
+  { score:5,  poly:[[0,0],[canvas.width,0],[canvas.width,canvas.height],[0,canvas.height]] }
+ ];
+}
 
-    running = true;
-    shotsDetected = 0;
-    lastShotTime = 0;
+function pointInPoly(pt, poly){
+ let x=pt[0], y=pt[1], inside=false;
+ for(let i=0,j=poly.length-1;i<poly.length;j=i++){
+  let xi=poly[i][0], yi=poly[i][1];
+  let xj=poly[j][0], yj=poly[j][1];
+  let intersect=((yi>y)!=(yj>y)) && (x < (xj-xi)*(y-yi)/(yj-yi)+xi);
+  if(intersect) inside=!inside;
+ }
+ return inside;
+}
 
-    let delay = parseInt(document.getElementById("delay").value);
-    let maxShots = parseInt(document.getElementById("shots").value);
-    let threshold = parseFloat(document.getElementById("threshold").value);
+function detect(){
+ ctx.drawImage(video,0,0);
 
-    // countdown
-    for (let i = delay; i > 0; i--) {
-        document.getElementById("status").textContent = "Starting in " + i;
-        await new Promise(r => setTimeout(r, 1000));
-    }
+ let src = cv.imread(canvas);
+ let hsv = new cv.Mat();
+ cv.cvtColor(src,hsv,cv.COLOR_RGBA2RGB);
+ cv.cvtColor(hsv,hsv,cv.COLOR_RGB2HSV);
 
-    document.getElementById("status").textContent = "GO!";
-    beep();
+ let low = new cv.Mat(hsv.rows,hsv.cols,hsv.type(),[0,120,120,0]);
+ let high = new cv.Mat(hsv.rows,hsv.cols,hsv.type(),[10,255,255,255]);
 
-    startTime = Date.now();
+ let mask = new cv.Mat();
+ cv.inRange(hsv,low,high,mask);
 
-    function loop() {
-        if (!running) return;
+ let contours = new cv.MatVector();
+ let hierarchy = new cv.Mat();
+ cv.findContours(mask,contours,hierarchy,cv.RETR_EXTERNAL,cv.CHAIN_APPROX_SIMPLE);
 
-        let volume = getVolume();
+ let maxArea=0, hit=null;
 
-        // meter
-        document.getElementById("level").style.width = (volume * 300) + "%";
+ for(let i=0;i<contours.size();i++){
+  let cnt = contours.get(i);
+  let area = cv.contourArea(cnt);
+  if(area>maxArea){
+   let rect = cv.boundingRect(cnt);
+   hit=[rect.x+rect.width/2, rect.y+rect.height/2];
+   maxArea=area;
+  }
+ }
 
-        let now = Date.now();
+ let now=Date.now();
+ if(hit && now-lastShot>300){
+  shots++;
+  lastShot=now;
 
-        if (volume > threshold && (now - lastShotTime > cooldown)) {
-            shotsDetected++;
-            lastShotTime = now;
+  let hitScore=0;
+  for(let z of zones){
+   if(pointInPoly(hit,z.poly)){
+    hitScore=z.score;
+    break;
+   }
+  }
+  score+=hitScore;
 
-            let t = (now - startTime) / 1000;
-            log("Shot " + shotsDetected + " | " + t.toFixed(3) + " sec");
-        }
+  ctx.beginPath();
+  ctx.arc(hit[0],hit[1],10,0,2*Math.PI);
+  ctx.strokeStyle="red";
+  ctx.lineWidth=3;
+  ctx.stroke();
 
-        if (shotsDetected >= maxShots) {
-            let total = (Date.now() - startTime) / 1000;
-            document.getElementById("status").textContent = "Finished";
-            log("=== DONE ===");
-            log("Total Time: " + total.toFixed(3) + " sec");
-            running = false;
-            return;
-        }
+  updateUI();
+ }
 
-        requestAnimationFrame(loop);
-    }
+ // draw zones
+ ctx.strokeStyle="yellow";
+ for(let z of zones){
+  ctx.beginPath();
+  ctx.moveTo(z.poly[0][0],z.poly[0][1]);
+  for(let p of z.poly) ctx.lineTo(p[0],p[1]);
+  ctx.closePath();
+  ctx.stroke();
+ }
 
-    loop();
+ src.delete(); hsv.delete(); mask.delete();
+ contours.delete(); hierarchy.delete();
+ low.delete(); high.delete();
+
+ requestAnimationFrame(detect);
 }
 </script>
+
 </body>
 </html>
