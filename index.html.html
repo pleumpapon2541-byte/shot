@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Airsoft Timer</title>
+<style>
+body {
+    font-family: Arial;
+    text-align: center;
+    background: #111;
+    color: #fff;
+}
+.container {
+    max-width: 400px;
+    margin: auto;
+}
+button {
+    padding: 15px;
+    font-size: 18px;
+    margin: 10px;
+}
+#meter {
+    width: 100%;
+    height: 20px;
+    background: #333;
+}
+#level {
+    height: 100%;
+    width: 0%;
+    background: lime;
+}
+</style>
+</head>
+
+<body>
+<div class="container">
+<h2>🔫 Airsoft Timer</h2>
+
+<p>Shots: <input id="shots" type="number" value="5"></p>
+<p>Delay: <input id="delay" type="number" value="3"></p>
+<p>Sensitivity: <input id="threshold" type="range" min="0.01" max="0.5" step="0.01" value="0.1"></p>
+
+<div id="meter"><div id="level"></div></div>
+
+<h3 id="status">Ready</h3>
+
+<button onclick="start()">START</button>
+
+<pre id="log"></pre>
+</div>
+
+<script>
+let audioContext;
+let analyser;
+let dataArray;
+let running = false;
+
+let shotsDetected = 0;
+let lastShotTime = 0;
+let startTime = 0;
+
+const cooldown = 200; // ms
+
+async function initMic() {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    audioContext = new AudioContext();
+    const source = audioContext.createMediaStreamSource(stream);
+
+    analyser = audioContext.createAnalyser();
+    analyser.fftSize = 2048;
+
+    source.connect(analyser);
+
+    dataArray = new Uint8Array(analyser.fftSize);
+}
+
+function getVolume() {
+    analyser.getByteTimeDomainData(dataArray);
+    let sum = 0;
+    for (let i = 0; i < dataArray.length; i++) {
+        let x = (dataArray[i] - 128) / 128;
+        sum += x * x;
+    }
+    return Math.sqrt(sum / dataArray.length);
+}
+
+function beep() {
+    const ctx = new AudioContext();
+    const osc = ctx.createOscillator();
+    osc.frequency.value = 1000;
+    osc.connect(ctx.destination);
+    osc.start();
+    setTimeout(() => osc.stop(), 200);
+}
+
+function log(msg) {
+    document.getElementById("log").textContent += msg + "\n";
+}
+
+async function start() {
+    if (running) return;
+
+    document.getElementById("log").textContent = "";
+
+    if (!audioContext) await initMic();
+
+    running = true;
+    shotsDetected = 0;
+    lastShotTime = 0;
+
+    let delay = parseInt(document.getElementById("delay").value);
+    let maxShots = parseInt(document.getElementById("shots").value);
+    let threshold = parseFloat(document.getElementById("threshold").value);
+
+    // countdown
+    for (let i = delay; i > 0; i--) {
+        document.getElementById("status").textContent = "Starting in " + i;
+        await new Promise(r => setTimeout(r, 1000));
+    }
+
+    document.getElementById("status").textContent = "GO!";
+    beep();
+
+    startTime = Date.now();
+
+    function loop() {
+        if (!running) return;
+
+        let volume = getVolume();
+
+        // meter
+        document.getElementById("level").style.width = (volume * 300) + "%";
+
+        let now = Date.now();
+
+        if (volume > threshold && (now - lastShotTime > cooldown)) {
+            shotsDetected++;
+            lastShotTime = now;
+
+            let t = (now - startTime) / 1000;
+            log("Shot " + shotsDetected + " | " + t.toFixed(3) + " sec");
+        }
+
+        if (shotsDetected >= maxShots) {
+            let total = (Date.now() - startTime) / 1000;
+            document.getElementById("status").textContent = "Finished";
+            log("=== DONE ===");
+            log("Total Time: " + total.toFixed(3) + " sec");
+            running = false;
+            return;
+        }
+
+        requestAnimationFrame(loop);
+    }
+
+    loop();
+}
+</script>
+</body>
+</html>
